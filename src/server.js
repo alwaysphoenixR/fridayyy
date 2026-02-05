@@ -1,6 +1,8 @@
 import express from "express";
-const app = express();
 import dotenv from "dotenv";
+import { dbConnect } from "./db/connect.js";
+const app = express();
+
 dotenv.config();
 app.use(express.json());
 const PORT = process.env.PORT || 8000;
@@ -10,3 +12,4 @@ app.get("/", (req, res) => {
 app.listen(PORT, () => {
   console.log(`SERVER STARTED AT PORT NO ${PORT}`);
 });
+dbConnect();
