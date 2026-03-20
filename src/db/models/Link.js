@@ -10,6 +10,7 @@ const linkSchema = new Schema({
     type: Schema.Types.ObjectId,
     ref: "People",
     required: true,
+    unique: true,
   },
 });
 

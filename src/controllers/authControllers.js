@@ -1,13 +1,21 @@
 import jwt from "jsonwebtoken";
 import { userModel } from "../db/models/User.js";
 const JWT_SECRET = process.env.JWT_SECRET;
+import { CreateUserSchema, SigninSchema } from "../utils/types.js";
 export const signup = async (req, res) => {
   try {
-    const { username, password } = req.body;
-    if (!username || !password)
+    const parsedData = CreateUserSchema.safeParse(req.body);
+    if (!parsedData.success) {
       return res.status(411).json({
-        message: "Error in inputs",
+        message: "INCORRECT INPUTS",
+        err: parsedData.error,
       });
+    }
+    const { username, password } = parsedData.data;
+    // if (!username || !password)
+    //   return res.status(411).json({
+    //     message: "Error in inputs",
+    //   });
 
     const existingUser = await userModel.findOne({ username: username });
     if (existingUser) {
@@ -33,11 +41,20 @@ export const signup = async (req, res) => {
 
 export const login = async (req, res) => {
   try {
-    const { username, password } = req.body;
-    if (!username || !password)
-      return res.status(411).json({
-        message: "Error in inputs fill all",
+    const parsedData = SigninSchema.safeParse(req.body);
+    if (!parsedData.success) {
+      return res.status(400).json({
+        message: "INCORRECT INPUTS",
+        err: parsedData.error,
       });
+    }
+    const { username, password } = parsedData.data;
+
+    // const { username, password } = req.body;
+    // if (!username || !password)
+    //   return res.status(411).json({
+    //     message: "Error in inputs fill all",
+    //   });
     const getUser = await userModel.findOne({ username: username });
     if (!getUser) {
       return res.status(403).json({
@@ -51,8 +68,7 @@ export const login = async (req, res) => {
     }
     const token = jwt.sign(
       {
-        username: username,
-        password: password,
+        userId: getUser._id.toString(),
       },
       JWT_SECRET,
     );
