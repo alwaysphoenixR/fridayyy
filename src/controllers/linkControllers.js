@@ -7,11 +7,11 @@ export const createShareableLink = async (req, res) => {
   try {
     const { share, userId } = req.body;
 
-    if (share) {
+    if (share == "true") {
       const existingLink = await linkModel.findOne({ userId });
       if (existingLink) {
         return res.status(200).json({
-          // link: existingLink.hash,
+          link: existingLink.hash,
           message: "Link already exists",
         });
       }
@@ -24,7 +24,7 @@ export const createShareableLink = async (req, res) => {
       });
 
       return res.status(200).json({
-        // link: `${process.env.BASE_URL}/share/${hash}`,
+        link: hash,
         message: "Success",
       });
     } else {
@@ -48,17 +48,25 @@ export const createShareableLink = async (req, res) => {
   }
 };
 export const getBrainlink = async (req, res) => {
-  const hash = req.params.brainlink;
-  const brain = await linkModel.findOne({ hash: hash });
-  if (!brain) {
-    return res.status(400).json({
-      message: "please check the link once",
+  try {
+    const hash = req.params.brainLink;
+    console.log(hash);
+    const brain = await linkModel.findOne({ hash: hash });
+    if (!brain) {
+      return res.status(400).json({
+        message: "please check the link once",
+      });
+    }
+    const user = await userModel.findOne({ _id: brain.userId });
+    const content = await ContentModel.find({ userId: brain.userId });
+    return res.status(200).json({
+      username: user.username,
+      content: content,
+    });
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({
+      message: "Server error",
     });
   }
-  const user = await userModel.findOne({ _id: brain.userId });
-  const content = await ContentModel.find({ userId: brain.userId });
-  return res.status(200).json({
-    username: user.username,
-    content: content,
-  });
 };

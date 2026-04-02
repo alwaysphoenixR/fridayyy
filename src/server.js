@@ -3,6 +3,7 @@ import dotenv from "dotenv";
 import { dbConnect } from "./db/connect.js";
 import authRoutes from "./routes/authRoutes.js";
 import contentRoutes from "./routes/contentRoutes.js";
+import linkRoutes from "./routes/linkRoutes.js";
 
 dotenv.config();
 
@@ -19,6 +20,7 @@ app.get("/", (req, res) => {
 
 app.use("/v1", authRoutes);
 app.use("/v1", contentRoutes);
+app.use("/v1", linkRoutes);
 
 // db connect
 dbConnect();
