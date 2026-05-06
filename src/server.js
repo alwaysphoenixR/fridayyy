@@ -4,6 +4,7 @@ import { dbConnect } from "./db/connect.js";
 import authRoutes from "./routes/authRoutes.js";
 import contentRoutes from "./routes/contentRoutes.js";
 import linkRoutes from "./routes/linkRoutes.js";
+import searchRoutes from "./routes/search.routes.js";
 import { initializeQdrant } from "./db/qdrant.js";
 
 dotenv.config();
@@ -22,6 +23,7 @@ app.get("/", (req, res) => {
 app.use("/v1", authRoutes);
 app.use("/v1", contentRoutes);
 app.use("/v1", linkRoutes);
+app.use("/v1", searchRoutes);
 
 // db connect
 dbConnect();
