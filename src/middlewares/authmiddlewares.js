@@ -3,13 +3,14 @@ import dotenv from "dotenv";
 const JWT_SECRET = process.env.JWT_SECRET;
 export const tokenValidate = async (req, res, next) => {
   try {
-    const token = req?.headers["authorization"] || "";
+    const token = req?.headers["authorization"].split(" ")[1];
 
+    console.log("Actual token:", token);
     const decoded = await jwt.verify(token, JWT_SECRET);
     console.log(decoded);
 
     if (!decoded || !decoded.userId) {
-      return res.status(400).json({
+      return res.status(403).json({
         message: "UNAUTHORIZED",
       });
     }

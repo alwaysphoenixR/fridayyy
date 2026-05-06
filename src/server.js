@@ -4,6 +4,7 @@ import { dbConnect } from "./db/connect.js";
 import authRoutes from "./routes/authRoutes.js";
 import contentRoutes from "./routes/contentRoutes.js";
 import linkRoutes from "./routes/linkRoutes.js";
+import { initializeQdrant } from "./db/qdrant.js";
 
 dotenv.config();
 
@@ -24,7 +25,7 @@ app.use("/v1", linkRoutes);
 
 // db connect
 dbConnect();
-
+initializeQdrant();
 const PORT = process.env.PORT || 8000;
 app.listen(PORT, () => {
   console.log(`SERVER STARTED AT PORT NO ${PORT}`);
