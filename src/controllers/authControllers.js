@@ -1,239 +1,136 @@
-// // controllers/authControllers.js
-// import jwt from "jsonwebtoken";
-// import bcrypt from "bcrypt";
-// import { userModel } from "../db/models/User.js";
-// import { CreateUserSchema, SigninSchema } from "../utils/types.js";
-
-// const JWT_SECRET = process.env.JWT_SECRET;
-
-// export const signup = async (req, res) => {
-//   try {
-//     const parsedData = CreateUserSchema.safeParse(req.body);
-//     if (!parsedData.success) {
-//       return res.status(400).json({
-//         message: "Incorrect inputs",
-//         err: parsedData.error.issues, // .issues gives a cleaner error array for the frontend
-//       });
-//     }
-
-//     const { username, password } = parsedData.data;
-
-//     const existingUser = await userModel.findOne({ username });
-//     if (existingUser) {
-//       return res.status(409).json({
-//         message: "User already exists. Please log in.",
-//       });
-//     }
-
-//     const saltRounds = 10;
-//     const hashedPassword = await bcrypt.hash(password, saltRounds);
-
-//     const newUser = await userModel.create({
-//       username: username,
-//       password: hashedPassword,
-//     });
-
-//     return res.status(201).json({
-//       message: "Account created successfully",
-//       data: {
-//         username: newUser.username,
-//         userId: newUser._id,
-//       },
-//     });
-//   } catch (err) {
-//     console.error("Signup Error:", err);
-//     return res.status(500).json({
-//       message: "Internal server error",
-//     });
-//   }
-// };
-
-// export const login = async (req, res) => {
-//   try {
-//     const parsedData = SigninSchema.safeParse(req.body);
-//     if (!parsedData.success) {
-//       return res.status(400).json({
-//         message: "Incorrect inputs",
-//         err: parsedData.error.issues,
-//       });
-//     }
-
-//     const { username, password } = parsedData.data;
-
-//     const getUser = await userModel.findOne({ username });
-//     if (!getUser) {
-//       return res.status(401).json({
-//         // 401 Unauthorized is best for bad credentials
-//         message: "Invalid username or password",
-//       });
-//     }
-
-//     //  Compare the plain text to the hashed password
-//     const isPasswordValid = await bcrypt.compare(password, getUser.password);
-//     if (!isPasswordValid) {
-//       return res.status(401).json({
-//         message: "Invalid username or password",
-//       });
-//     }
-
-//     // Safety Check: Ensure JWT_SECRET exists
-//     if (!JWT_SECRET) {
-//       throw new Error("JWT_SECRET is not defined in environment variables");
-//     }
-
-//     const token = jwt.sign({ userId: getUser._id.toString() }, JWT_SECRET);
-
-//     return res.status(200).json({
-//       message: "Logged in successfully",
-//       token: token,
-//     });
-//   } catch (err) {
-//     console.error("Login Error:", err);
-//     return res.status(500).json({
-//       message: "Internal server error",
-//     });
-//   }
-// };
-
-// controllers/authControllers.js
-import { userModel } from "../db/models/User.js";
-import { CreateUserSchema, SigninSchema } from "../utils/types.js";
+import { UserModel } from "../db/models/User.js"; // Fixed: PascalCase
 import jwt from "jsonwebtoken";
+import bcrypt from "bcrypt";
 
-// Helper to generate and save tokens
-const generateAccessAndRefereshTokens = async (userId) => {
-  try {
-    const user = await userModel.findById(userId);
-    const accessToken = user.generateAccessToken();
-    const refreshToken = user.generateRefreshToken();
+// Consistent cookie options — defined once, used in login, signup, logout, refresh.
+// secure: only send over HTTPS in production. In dev, allows HTTP (localhost).
+// sameSite: "Strict" prevents CSRF — cookie is not sent on cross-site requests.
+// httpOnly: JS cannot read this cookie — blocks XSS token theft.
+const COOKIE_OPTIONS = {
+  httpOnly: true,
+  secure: process.env.NODE_ENV === "production",
+  sameSite: "Strict",
+};
 
-    // Save refresh token to DB for rotation/revocation
-    user.refreshToken = refreshToken;
-    await user.save({ validateBeforeSave: false });
+// Generates both tokens and persists a HASHED refresh token to DB.
+// Accepts the full user document — avoids an extra findById round trip.
+// Moved out of individual controllers so it's reusable (OAuth, SSO, etc.)
+const generateAndSaveTokens = async (user) => {
+  const accessToken = user.generateAccessToken();
+  const refreshToken = user.generateRefreshToken();
 
-    return { accessToken, refreshToken };
-  } catch (error) {
-    throw new Error("Error while generating tokens");
-  }
+  // Store a bcrypt hash of the refresh token — not the raw token.
+  // Raw token = credential. If DB is breached, hashed tokens cannot be replayed.
+  // Cost factor 10 is intentional — refresh happens rarely so CPU cost is acceptable.
+  const hashedRefreshToken = await bcrypt.hash(refreshToken, 10);
+
+  // Use findByIdAndUpdate instead of user.save() —
+  // more targeted, skips pre-save hooks (password re-hash, etc.)
+  await UserModel.findByIdAndUpdate(user._id, {
+    $set: { refreshToken: hashedRefreshToken },
+  });
+
+  return { accessToken, refreshToken }; // Return RAW token to send to client
 };
 
 export const signup = async (req, res) => {
   try {
-    const parsedData = CreateUserSchema.safeParse(req.body);
-    if (!parsedData.success) {
-      return res
-        .status(400)
-        .json({ message: "Incorrect inputs", err: parsedData.error.issues });
-    }
+    // Validation is now handled by validate(CreateUserSchema) middleware at route level.
+    // req.body is already validated, trimmed, and lowercased before reaching here.
+    const { username, password } = req.body;
 
-    const { username, password } = parsedData.data;
-
-    const existingUser = await userModel.findOne({ username });
+    // Check for existing user — DB unique index also catches this,
+    // but checking first gives us a controlled 409 instead of a raw MongoError.
+    // Race condition: two simultaneous signups with same username —
+    // one will hit the unique index and throw. Caught below and returned as 409.
+    const existingUser = await UserModel.findOne({ username });
     if (existingUser) {
-      return res.status(409).json({ message: "User already exists." });
+      return res.status(409).json({ message: "Username already taken" });
     }
 
-    // Passwords are now hashed automatically in the Model's pre-save hook!
-    const newUser = await userModel.create({ username, password });
+    // Password is hashed automatically by the pre-save hook in User model.
+    // Do not hash here — the hook handles it.
+    const newUser = await UserModel.create({ username, password });
 
-    const { accessToken, refreshToken } = await generateAccessAndRefereshTokens(
-      newUser._id,
-    );
+    // Pass newUser directly — avoids a second findById inside generateAndSaveTokens.
+    const { accessToken, refreshToken } = await generateAndSaveTokens(newUser);
 
     return res
       .status(201)
-      .cookie("refreshToken", refreshToken, { httpOnly: true, secure: true })
+      .cookie("refreshToken", refreshToken, COOKIE_OPTIONS)
       .json({
         message: "Account created successfully",
         accessToken,
-        username: newUser.username,
+        user: { username: newUser.username, id: newUser._id },
       });
   } catch (err) {
+    // Handle duplicate key error from MongoDB unique index (race condition on username).
+    if (err.code === 11000) {
+      return res.status(409).json({ message: "Username already taken" });
+    }
+    console.error("[signup] Error:", err); // Log for observability — never logged before
     return res.status(500).json({ message: "Internal server error" });
   }
 };
 
 export const login = async (req, res) => {
   try {
-    const parsedData = SigninSchema.safeParse(req.body);
-    if (!parsedData.success) {
-      return res.status(400).json({ message: "Incorrect inputs" });
-    }
+    // req.body already validated by validate(SigninSchema) middleware.
+    const { username, password } = req.body;
 
-    const { username, password } = parsedData.data;
+    const user = await UserModel.findOne({ username });
 
-    const user = await userModel.findOne({ username });
+    // Unified error message — never reveal whether username or password was wrong.
+    // Prevents user enumeration attacks (attacker can't tell if username exists).
     if (!user) {
       return res.status(401).json({ message: "Invalid credentials" });
     }
 
-    // Using the method we added to the User Model
     const isPasswordValid = await user.isPasswordCorrect(password);
     if (!isPasswordValid) {
       return res.status(401).json({ message: "Invalid credentials" });
     }
 
-    const { accessToken, refreshToken } = await generateAccessAndRefereshTokens(
-      user._id,
-    );
-
-    const options = {
-      httpOnly: true, // Prevents XSS access
-      secure: process.env.NODE_ENV === "production",
-      sameSite: "Strict",
-    };
+    const { accessToken, refreshToken } = await generateAndSaveTokens(user);
 
     return res
       .status(200)
-      .cookie("refreshToken", refreshToken, options)
+      .cookie("refreshToken", refreshToken, COOKIE_OPTIONS)
       .json({
         message: "Logged in successfully",
-        accessToken, // Frontend stores this in state (memory)
+        accessToken, // Frontend stores in memory/state — NOT localStorage
         user: { username: user.username, id: user._id },
       });
   } catch (err) {
+    console.error("[login] Error:", err);
     return res.status(500).json({ message: "Internal server error" });
   }
 };
 
 export const logout = async (req, res) => {
   try {
-    // 1. Clear the Refresh Token in the Database
-    // We get the user ID from the 'authMiddleware' (which we'll write next)
-    await userModel.findByIdAndUpdate(
-      req.user._id,
-      {
-        $set: {
-          refreshToken: undefined, // Or use $unset to remove the field entirely
-        },
-      },
-      {
-        new: true,
-      },
-    );
+    // req.user is set by tokenValidate middleware.
+    // Clear refresh token from DB — invalidates all future refresh attempts.
+    // $unset removes the field entirely. $set: { refreshToken: undefined } does NOTHING in MongoDB.
+    await UserModel.findByIdAndUpdate(req.user._id, {
+      $unset: { refreshToken: 1 },
+    });
 
-    // 2. Clear the Cookie in the Browser
-    const options = {
-      httpOnly: true,
-      secure: process.env.NODE_ENV === "production",
-      sameSite: "Strict",
-    };
-
+    // Clear the httpOnly cookie from the browser.
+    // Must pass the same options used when setting — otherwise clearCookie silently fails.
     return res
       .status(200)
-      .clearCookie("refreshToken", options) // Clears the browser cookie
-      .json({ message: "User logged out successfully" });
+      .clearCookie("refreshToken", COOKIE_OPTIONS)
+      .json({ message: "Logged out successfully" });
   } catch (err) {
-    console.error("Logout Error:", err);
+    console.error("[logout] Error:", err);
     return res
       .status(500)
       .json({ message: "Internal server error during logout" });
   }
 };
-// import { userModel } from "../db/models/User.js";
 
 export const refreshAccessToken = async (req, res) => {
-  // 1. Get the token from cookies
   const incomingRefreshToken = req.cookies.refreshToken;
 
   if (!incomingRefreshToken) {
@@ -241,50 +138,55 @@ export const refreshAccessToken = async (req, res) => {
   }
 
   try {
-    // 2. Verify the token
+    // Verify signature and expiry — throws on tampered or expired token.
+    // jwt.verify never returns null, so no optional chaining needed on the result.
     const decodedToken = jwt.verify(
       incomingRefreshToken,
       process.env.REFRESH_TOKEN_SECRET,
     );
 
-    // 3. Find user and check if token matches the one in DB
-    const user = await userModel.findById(decodedToken?._id);
-
-    if (!user) {
+    const user = await UserModel.findById(decodedToken._id);
+    if (!user || !user.refreshToken) {
       return res.status(401).json({ message: "Invalid refresh token" });
     }
 
-    // Security check: Does the cookie token match the DB token?
-    // If they don't match, the token might have been used/stolen
-    if (incomingRefreshToken !== user.refreshToken) {
+    // Compare incoming token against the HASHED token stored in DB.
+    // bcrypt.compare is timing-safe — prevents timing attacks on token comparison.
+    // Plain string comparison (===) is NOT timing-safe and should never be used for credentials.
+    const isTokenValid = await bcrypt.compare(
+      incomingRefreshToken,
+      user.refreshToken,
+    );
+
+    if (!isTokenValid) {
+      // Token doesn't match DB — possible token theft or reuse after rotation.
+      // Security: consider invalidating ALL sessions here (clear refreshToken entirely)
+      // to protect the user in case their token was stolen.
+      console.warn("[refreshAccessToken] Token mismatch for user:", user._id);
       return res
         .status(401)
-        .json({ message: "Refresh token is expired or used" });
+        .json({ message: "Refresh token is invalid or already used" });
     }
 
-    // 4. Generate NEW tokens (Refresh Token Rotation)
-    const accessToken = user.generateAccessToken();
-    const newRefreshToken = user.generateRefreshToken();
-
-    // 5. Update the DB with the NEW refresh token
-    user.refreshToken = newRefreshToken;
-    await user.save({ validateBeforeSave: false });
-
-    // 6. Send response
-    const options = {
-      httpOnly: true,
-      secure: process.env.NODE_ENV === "production",
-      sameSite: "Strict",
-    };
+    // Refresh Token Rotation — generate new tokens on every refresh.
+    // Old refresh token is replaced in DB — replayed tokens will fail the bcrypt check above.
+    const { accessToken, refreshToken: newRefreshToken } =
+      await generateAndSaveTokens(user);
 
     return res
       .status(200)
-      .cookie("refreshToken", newRefreshToken, options)
+      .cookie("refreshToken", newRefreshToken, COOKIE_OPTIONS)
       .json({
         message: "Access token refreshed",
-        accessToken, // New access token for frontend state
+        accessToken,
       });
   } catch (error) {
+    if (error.name === "TokenExpiredError") {
+      return res
+        .status(401)
+        .json({ message: "Refresh token has expired, please log in again" });
+    }
+    console.error("[refreshAccessToken] Error:", error);
     return res.status(401).json({ message: "Invalid refresh token" });
   }
 };
