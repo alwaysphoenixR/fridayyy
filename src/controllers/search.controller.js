@@ -1,4 +1,3 @@
-// src/controllers/search.controller.js
 import qdrantClient from "../db/qdrant.js";
 import {
   generateDenseVector,
@@ -9,89 +8,96 @@ import {
   generateHyDE,
   generateFinalAnswer,
 } from "../services/llm.service.js";
+// import { QDRANT_COLLECTION_NAME } from "../config/qdrant.config.js";
+import { QDRANT_COLLECTION_NAME } from "../db/qdrant.js";
 
-const COLLECTION_NAME = "second_brain";
+const MAX_QUERY_LENGTH = 1000;
 
 export const searchBrain = async (req, res) => {
   try {
-    const { query } = req.body;
-    const userId = req.userId; // From your auth middleware
+    // Trim before validation — whitespace-only query wastes 2 LLM API calls
+    const query = req.body.query?.trim();
+
+    // req.user._id set by tokenValidate middleware.
+    // MUST be .toString() — Qdrant filter does string match against stored string payload.
+    // req.userId (original) was undefined — broke the entire privacy filter.
+    const userId = req.user._id.toString();
 
     if (!query) {
-      return res.status(400).json({ error: "Search query is required." });
+      return res.status(400).json({ message: "Search query is required" });
+    }
+    if (query.length > MAX_QUERY_LENGTH) {
+      return res.status(400).json({
+        message: `Query cannot exceed ${MAX_QUERY_LENGTH} characters`,
+      });
     }
 
-    console.log(`🔍 Searching Brain for: "${query}"`);
+    // Stage 1: Query transformation — must be sequential (HyDE depends on rewrite)
+    // { result, usedFallback } — lets us track when LLM degradation occurs
+    const { result: rewrittenQuery, usedFallback: rewriteFallback } =
+      await rewriteQuery(query);
+    const { result: hydeText, usedFallback: hydeFallback } =
+      await generateHyDE(rewrittenQuery);
 
-    // 1. Fast HyDE: Rewrite the question into a fake answer
-    const rewritetext = await rewriteQuery(query);
-    const hydeText = await generateHyDE(rewritetext);
-    console.log(`🧠 HyDE Generated: bridging semantic gap...`);
+    if (rewriteFallback || hydeFallback) {
+      // Track LLM degradation — if this fires often, your Groq quota or key has an issue
+      console.warn(
+        `[searchBrain] LLM fallback used — rewrite: ${rewriteFallback}, hyde: ${hydeFallback}`,
+      );
+    }
 
-    // 2. Vectorize the HyDE text
-    const denseVector = await generateDenseVector(hydeText);
-    const sparseVector = await generateSparseVector(hydeText);
+    // Stage 2: Vectorization — dense and sparse take same input, fully independent
+    const [denseVector, sparseVector] = await Promise.all([
+      generateDenseVector(hydeText),
+      generateSparseVector(hydeText),
+    ]);
 
-    // 3. Native Hybrid Search using Reciprocal Rank Fusion (RRF)
-    // This perfectly merges Keyword matching and Semantic Meaning.
-    const searchResults = await qdrantClient.query(COLLECTION_NAME, {
-      // The Fusion algorithm to merge both searches
+    // Stage 3: Hybrid search — RRF fuses dense (semantic) + sparse (keyword) rankings
+    const searchResults = await qdrantClient.query(QDRANT_COLLECTION_NAME, {
       query: { fusion: "rrf" },
-
-      // The two parallel searches to run
       prefetch: [
-        {
-          query: denseVector,
-          using: "dense-text",
-          limit: 10,
-        },
+        { query: denseVector, using: "dense-text", limit: 10 },
         {
           query: { indices: sparseVector.indices, values: sparseVector.values },
           using: "sparse-text",
           limit: 10,
         },
       ],
-
-      // The strict Privacy Gatekeeper
+      // Privacy gatekeeper — userId MUST match exactly (string vs string)
+      // Removing or misconfiguring this filter exposes all users' data
       filter: {
         must: [{ key: "userId", match: { value: userId } }],
       },
-
-      // The final number of merged chunks we want back
       limit: 5,
       with_payload: true,
     });
 
-    console.log(
-      `🎯 Found ${searchResults.points.length} highly relevant chunks.`,
-    );
+    // Defensive access — unexpected Qdrant response shape won't crash with ??
+    const points = searchResults?.points ?? [];
 
-    // If the database has absolutely nothing on this topic
-    if (searchResults.points.length === 0) {
+    if (points.length === 0) {
       return res.status(200).json({
         answer:
-          "I couldn't find any notes related to this in your Second Brain.",
+          "I couldn't find anything related to that in your Second Brain.",
         sources: [],
       });
     }
 
-    // 4. Send the perfectly curated chunks to Llama 3 for the final answer
-    console.log(`🤖 Sending to Groq Llama 3 (70B)...`);
-    const finalAnswer = await generateFinalAnswer(query, searchResults.points);
+    // Stage 4: Answer generation — 70B model reads chunks, produces grounded response
+    const finalAnswer = await generateFinalAnswer(query, points);
 
-    // 5. Return the AI answer along with the source chunks to the frontend
     return res.status(200).json({
       answer: finalAnswer,
-      sources: searchResults.points.map((p) => ({
+      sources: points.map((p) => ({
         title: p.payload.title,
         text: p.payload.text,
-        score: p.score, // Shows how confident the vector DB was
+        score: p.score,
       })),
     });
   } catch (error) {
-    console.error("❌ Search Controller Error:", error);
+    console.error("[searchBrain] Error:", error);
     return res
       .status(500)
-      .json({ error: "Failed to search the Second Brain." });
+      .json({ message: "Search failed. Please try again." });
   }
 };

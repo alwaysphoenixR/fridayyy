@@ -1,253 +1,227 @@
+// services/llm.service.js
+import { QDRANT_COLLECTION_NAME } from "../db/qdrant.js";
+
+// --- CONFIG ---
+// Centralize all LLM configuration. When Groq deprecates a model or changes
+// their API URL, update here — not inside individual function bodies.
+
 const GROQ_URL = "https://api.groq.com/openai/v1/chat/completions";
 
-/**
- * Query Rewriting
- * Converts vague user questions into retrieval-optimized technical search queries.
- */
-export const rewriteQuery = async (userQuery) => {
+// Model selection — deliberate speed vs quality tradeoff:
+// FAST model: rewrite + HyDE — speed matters more than depth, runs before retrieval
+// SMART model: final answer — quality matters, user waits for this, needs reasoning
+const MODELS = {
+  fast: "llama-3.1-8b-instant", // ~200ms, used for query transformation
+  smart: "llama-3.3-70b-versatile", // ~1-3s, used for final answer synthesis
+};
+
+// Token budgets per operation — prevents runaway generation costs and latency.
+const MAX_TOKENS = {
+  rewrite: 150, // Rewritten query should be a single sentence
+  hyde: 400, // Hypothetical answer — a paragraph or short code snippet
+  answer: 1500, // Final answer — detailed but bounded
+};
+
+const LLM_TIMEOUT_MS = 15000; // 15 seconds — abort if Groq hangs
+
+// Guard at module load — fail loudly at startup, not silently on first user search.
+if (!process.env.GROQ_API_KEY) {
+  throw new Error(
+    "FATAL: GROQ_API_KEY is not configured. Check your .env file.",
+  );
+}
+
+// --- SHARED HTTP HELPER ---
+// Centralizes: auth headers, timeout, response validation, error handling.
+// All three LLM functions use this — add logging, retry, or timeout here once.
+async function callGroq(model, messages, { maxTokens, temperature }) {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), LLM_TIMEOUT_MS);
+
   try {
     const response = await fetch(GROQ_URL, {
       method: "POST",
+      signal: controller.signal, // Abort if Groq hangs beyond LLM_TIMEOUT_MS
       headers: {
         Authorization: `Bearer ${process.env.GROQ_API_KEY}`,
         "Content-Type": "application/json",
       },
       body: JSON.stringify({
-        model: "llama-3.1-8b-instant",
-        messages: [
-          {
-            role: "system",
-            content: `
-You are an expert search query optimizer for a software engineering knowledge base.
-
-Rewrite the user's query into a dense, keyword-rich technical search query.
-
-Rules:
-1. Preserve the original intent.
-2. Expand vague terms into technical terminology.
-3. Remove filler words.
-4. Output ONLY the rewritten query.
-5. Do not answer the question.
-            `,
-          },
-          {
-            role: "user",
-            content: userQuery,
-          },
-        ],
-        temperature: 0.2,
+        model,
+        messages,
+        temperature,
+        max_tokens: maxTokens, // Always set — prevents runaway generation
       }),
     });
 
     if (!response.ok) {
-      throw new Error("Query rewrite failed");
+      const errorBody = await response.text();
+      // Include status code in error — distinguishes 429 (rate limit) from 401 (bad key)
+      throw new Error(`Groq API error ${response.status}: ${errorBody}`);
     }
 
     const data = await response.json();
 
-    return data.choices[0].message.content.trim();
-  } catch (error) {
-    console.error("Rewrite failed:", error);
+    // Defensive access — Groq can return empty choices on content filtering
+    const content = data?.choices?.[0]?.message?.content;
+    if (!content) {
+      throw new Error(`Empty response from Groq model ${model}`);
+    }
 
-    // Fallback
-    return userQuery;
+    return content.trim();
+  } finally {
+    clearTimeout(timeoutId); // Always clear timeout — prevent memory leak
   }
-};
+}
 
-/**
- * 1. Fast HyDE (Hypothetical Document Embeddings)
- * We ask Llama 3 to write a fake code snippet that answers the user's question.
- */
-export const generateHyDE = async (userQuery) => {
+// --- QUERY REWRITING ---
+// Converts vague natural language into retrieval-optimized technical queries.
+// Failure falls back to original query — silent degradation is acceptable here
+// because the original query is still usable for retrieval.
+// Caller receives { result, usedFallback } for observability.
+export const rewriteQuery = async (userQuery) => {
   try {
-    const response = await fetch(GROQ_URL, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${process.env.GROQ_API_KEY}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        model: "llama-3.1-8b-instant", // Using the smaller 8B model because it's blindingly fast
-        messages: [
-          {
-            role: "system",
-            content:
-              "You are a technical writer. The user will ask a programming question. Write a very brief, hypothetical code snippet and explanation that perfectly answers it. Do not use conversational filler. Just write the technical answer.",
-          },
-          { role: "user", content: userQuery },
-        ],
-        temperature: 0.3, // Low temperature for factual consistency
-      }),
-    });
+    const rewritten = await callGroq(
+      MODELS.fast,
+      [
+        {
+          role: "system",
+          content: `You are an expert search query optimizer for a personal knowledge base.
 
-    if (!response.ok) throw new Error("Groq HyDE API failed");
-    const data = await response.json();
-    return data.choices[0].message.content;
+Rewrite the user's query into a dense, keyword-rich search query.
+
+Rules:
+1. Preserve the original intent exactly.
+2. Expand vague terms into specific technical terminology.
+3. Remove filler words and conversational phrasing.
+4. Output ONLY the rewritten query — no explanation, no preamble.
+5. Do not answer the question.`,
+        },
+        { role: "user", content: userQuery },
+      ],
+      { maxTokens: MAX_TOKENS.rewrite, temperature: 0.2 },
+    );
+
+    return { result: rewritten, usedFallback: false };
   } catch (error) {
-    console.error(" HyDE generation failed:", error);
-    return userQuery; // Fallback: If HyDE fails, just use the original question
+    // Fallback: original query is better than no query.
+    // Log with context so you can track rewrite failure rate in production.
+    console.error(
+      "[rewriteQuery] Failed, using original query:",
+      error.message,
+    );
+    return { result: userQuery, usedFallback: true };
   }
 };
 
-/**
- * 2. The Final Answer (Senior Staff Engineer Persona)
- */
+// --- HyDE (Hypothetical Document Embeddings) ---
+// Generates a fake "ideal answer" to embed instead of the question.
+// Why: answers live closer to answers in embedding space — dramatically improves recall.
+// Failure falls back to rewritten query — still better than raw question.
+export const generateHyDE = async (rewrittenQuery) => {
+  try {
+    const hydeText = await callGroq(
+      MODELS.fast,
+      [
+        {
+          role: "system",
+          // Stored prompt injection defense: content inside <context> is DATA not instructions.
+          // The context tag in generateFinalAnswer provides the same defense there.
+          content: `You are a technical writer. Write a brief, hypothetical answer or code snippet 
+that would perfectly answer the user's question. Be direct and technical. 
+No conversational filler. Just the answer content itself.`,
+        },
+        { role: "user", content: rewrittenQuery },
+      ],
+      { maxTokens: MAX_TOKENS.hyde, temperature: 0.3 },
+    );
+
+    return { result: hydeText, usedFallback: false };
+  } catch (error) {
+    console.error(
+      "[generateHyDE] Failed, using rewritten query:",
+      error.message,
+    );
+    return { result: rewrittenQuery, usedFallback: true };
+  }
+};
+
+// --- FINAL ANSWER GENERATION ---
+// Reads retrieved chunks and synthesizes a grounded, cited answer.
+// Uses the large model — quality over speed at this stage.
+// Does NOT fall back on failure — a wrong answer is worse than an honest error.
 export const generateFinalAnswer = async (userQuery, contextChunks) => {
-  try {
-    // Stitch the retrieved chunks into one big string
-    const assembledContext = contextChunks
-      .map(
-        (chunk, index) => `\n--- Chunk ${index + 1} ---\n${chunk.payload.text}`,
-      )
-      .join("\n");
-    const systemPrompt = `
-You are the user's "Second Brain" retrieval assistant.
+  // Guard: filter chunks with missing text — bad ingestion data shouldn't crash answer gen
+  const validChunks = contextChunks.filter((c) => c?.payload?.text);
 
-Your job is to retrieve, synthesize, and explain information ONLY from the provided context.
+  if (validChunks.length === 0) {
+    // Don't call the LLM with empty context — it will hallucinate.
+    return "I couldn't find any relevant notes in your Second Brain for this query.";
+  }
+
+  // Assemble context — clearly delimited so the LLM treats it as data, not instructions.
+  // Stored prompt injection defense: attacker-controlled content is inside <context> tags,
+  // which the system prompt instructs the model to treat as retrieved data only.
+  const assembledContext = validChunks
+    .map((chunk, i) => `\n--- Chunk ${i + 1} ---\n${chunk.payload.text}`)
+    .join("\n");
+
+  const systemPrompt = `You are the user's "Second Brain" retrieval assistant.
 
 ========================
 CORE DIRECTIVE
 ========================
-You MUST answer ONLY using the provided context chunks.
+Answer ONLY using the provided context chunks.
 
 Do NOT use prior knowledge.
-Do NOT assume.
 Do NOT hallucinate.
 Do NOT fill gaps with general knowledge.
 
-If the answer cannot be found in the provided context, respond EXACTLY:
-
+If the answer is not in the context, respond EXACTLY:
 "I do not have notes on this in your Second Brain."
 
 ========================
 REASONING RULES
 ========================
-
-1. GROUNDING
-Every factual statement must be traceable to one or more context chunks.
-
-2. SYNTHESIS
-If the answer requires combining multiple chunks:
-- Connect them logically.
-- Preserve original meaning.
-- Never invent missing links.
-
-3. CONFLICT RESOLUTION
-If chunks contain conflicting information:
-- Explicitly mention the conflict.
-- Show both versions.
-- Cite both sources.
-
-Example:
-"Chunk 2 states X, while Chunk 5 states Y."
-
-4. UNCERTAINTY
-If context is incomplete, ambiguous, or partial:
-- Clearly say the notes are incomplete.
-- Only state what is supported.
-
-5. DOMAIN AGNOSTIC
-The notes may include:
-- Programming
-- Machine Learning
-- Research Papers
-- Mathematics
-- System Design
-- Personal Notes
-- Documentation
-- Product Ideas
-- Books
-- Career Notes
-
-Adapt your explanation style to the domain.
+1. GROUNDING: Every claim must trace to a context chunk.
+2. SYNTHESIS: Combine multiple chunks logically — never invent connections.
+3. CONFLICT: If chunks conflict, show both: "Chunk 2 states X, while Chunk 5 states Y."
+4. UNCERTAINTY: If context is partial, say so explicitly.
 
 ========================
 OUTPUT FORMAT
 ========================
 
-Always structure responses like this:
-
 ## Answer
-[Direct answer]
+[Direct answer from context]
 
 ## Supporting Notes
-[List the evidence used]
+[Evidence from chunks]
 
 ## Sources
-[Chunk citations with metadata]
+[Chunk citations]
 
-Example:
-
-## Answer
-Redis uses in-memory storage for low-latency caching.
-
-## Supporting Notes
-- Stores key-value pairs in RAM.
-- Supports persistence mechanisms.
-
-## Sources
-- Chunk 1 (Title: Redis Notes, Type: Documentation)
-- Chunk 4 (Title: System Design Interview Notes)
+Citation format: [Chunk X | title="<title>" | type="<type>"]
 
 ========================
-CITATION RULES
+FORMATTING
 ========================
-
-Every important claim MUST cite its source.
-
-Use this format:
-
-[Chunk X | title="<title>" | source="<source>" | type="<type>"]
-
-If metadata is missing, use:
-
-[Chunk X]
-
-Never cite chunks you did not use.
-
-========================
-FORMATTING RULES
-========================
-
-- Use Markdown.
-- Use bullet points when helpful.
-- Use code blocks for code.
-- Use equations for math if relevant.
-- Keep answers dense and useful.
-- No filler.
-- No phrases like:
-  "Based on the context..."
-  "According to the provided information..."
-  "From the retrieved chunks..."
-
-Just answer directly.
+- Markdown
+- Code blocks for code
+- No filler phrases like "Based on the context..." — just answer directly
 
 <context>
 ${assembledContext}
-</context>
-`;
+</context>`;
 
-    const response = await fetch(GROQ_URL, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${process.env.GROQ_API_KEY}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        model: "llama-3.3-70b-versatile", // Using the massive 70B model for deep reasoning
-        messages: [
-          { role: "system", content: systemPrompt },
-          { role: "user", content: userQuery },
-        ],
-        temperature: 0.1, // Strict grounding
-      }),
-    });
-
-    if (!response.ok) throw new Error("Groq Final Answer API failed");
-    const data = await response.json();
-    return data.choices[0].message.content;
-  } catch (error) {
-    console.error(" Final Answer generation failed:", error);
-    throw error;
-  }
+  // Re-throw on failure — wrong answer is worse than honest error.
+  // search controller handles the thrown error and returns 500 to client.
+  return await callGroq(
+    MODELS.smart,
+    [
+      { role: "system", content: systemPrompt },
+      { role: "user", content: userQuery },
+    ],
+    { maxTokens: MAX_TOKENS.answer, temperature: 0.1 },
+  );
 };
