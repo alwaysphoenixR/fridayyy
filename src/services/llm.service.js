@@ -11,15 +11,25 @@ const GROQ_URL = "https://api.groq.com/openai/v1/chat/completions";
 // FAST model: rewrite + HyDE — speed matters more than depth, runs before retrieval
 // SMART model: final answer — quality matters, user waits for this, needs reasoning
 const MODELS = {
-  fast: "llama-3.1-8b-instant", // ~200ms, used for query transformation
-  smart: "llama-3.3-70b-versatile", // ~1-3s, used for final answer synthesis
+  fast: "openai/gpt-oss-20b",
+  smart: "openai/gpt-oss-120b",
 };
+// models are depreciated
+// const MODELS = {
+//   fast: "llama-3.1-8b-instant", // ~200ms, used for query transformation
+//   smart: "llama-3.3-70b-versatile", // ~1-3s, used for final answer synthesis
+// };
 
 // Token budgets per operation — prevents runaway generation costs and latency.
+// const MAX_TOKENS = {
+//   rewrite: 150, // Rewritten query should be a single sentence
+//   hyde: 400, // Hypothetical answer — a paragraph or short code snippet
+//   answer: 1500, // Final answer — detailed but bounded
+// };
 const MAX_TOKENS = {
-  rewrite: 150, // Rewritten query should be a single sentence
-  hyde: 400, // Hypothetical answer — a paragraph or short code snippet
-  answer: 1500, // Final answer — detailed but bounded
+  rewrite: 300,
+  hyde: 600,
+  answer: 2000,
 };
 
 const LLM_TIMEOUT_MS = 15000; // 15 seconds — abort if Groq hangs
@@ -50,7 +60,8 @@ async function callGroq(model, messages, { maxTokens, temperature }) {
         model,
         messages,
         temperature,
-        max_tokens: maxTokens, // Always set — prevents runaway generation
+        max_tokens: maxTokens,
+        reasoning_effort: "low", // Always set — prevents runaway generation
       }),
     });
 

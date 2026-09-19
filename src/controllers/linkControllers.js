@@ -1,5 +1,5 @@
 import { LinkModel } from "../db/models/Link.js";
-import { UserModel } from "../db/models/User.js"; // Fixed: PascalCase
+import { UserModel } from "../db/models/User.js"; 
 import { ContentModel } from "../db/models/Content.js";
 import crypto from "crypto";
 

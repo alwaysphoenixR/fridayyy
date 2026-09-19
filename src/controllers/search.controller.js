@@ -47,11 +47,14 @@ export const searchBrain = async (req, res) => {
     }
 
     // Stage 2: Vectorization — dense and sparse take same input, fully independent
+    // const [denseVector, sparseVector] = await Promise.all([
+    //   generateDenseVector(hydeText),
+    //   generateSparseVector(hydeText),
+    // ]);
     const [denseVector, sparseVector] = await Promise.all([
-      generateDenseVector(hydeText),
+      generateDenseVector(hydeText, "query"),
       generateSparseVector(hydeText),
     ]);
-
     // Stage 3: Hybrid search — RRF fuses dense (semantic) + sparse (keyword) rankings
     const searchResults = await qdrantClient.query(QDRANT_COLLECTION_NAME, {
       query: { fusion: "rrf" },

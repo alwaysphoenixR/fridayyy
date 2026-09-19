@@ -1,6 +1,11 @@
-const OLLAMA_URL =
-  process.env.OLLAMA_URL || "http://localhost:11434/api/embeddings";
-const EMBEDDING_MODEL = process.env.EMBEDDING_MODEL || "nomic-embed-text";
+// const OLLAMA_URL =
+// process.env.OLLAMA_URL || "http://localhost:11434/api/embeddings";
+// const EMBEDDING_MODEL = process.env.EMBEDDING_MODEL || "nomic-embed-text";
+
+const JINA_URL = process.env.JINA_URL;
+const EMBEDDING_MODEL = process.env.EMBEDDING_MODEL;
+const JINA_API_KEY = process.env.JINA_API_KEY;
+console.log(JINA_API_KEY);
 
 // Dimensions to use from the full embedding vector.
 // nomic-embed-text produces 768 dims. We truncate to 256 using Matryoshka principle.
@@ -9,13 +14,15 @@ const EMBEDDING_MODEL = process.env.EMBEDDING_MODEL || "nomic-embed-text";
 const DENSE_VECTOR_DIMENSIONS = 256;
 
 const OLLAMA_TIMEOUT_MS = 120000; // Embedding can be slow for long text — 30s is generous
-
-if (!process.env.OLLAMA_URL) {
-  console.warn(
-    "[vector.service] OLLAMA_URL not set — using localhost. Set this env var for deployment.",
-  );
+const JINA_TIMEOUT_MS = 120000;
+// if (!process.env.OLLAMA_URL) {
+//   console.warn(
+//     "[vector.service] OLLAMA_URL not set — using localhost. Set this env var for deployment.",
+//   );
+// }
+if (!JINA_API_KEY) {
+  console.warn("[vector.service] JINA_API_KEY is not set.");
 }
-
 // --- STOP WORDS ---
 // Common English words with no semantic value for keyword retrieval.
 // These inflate sparse vectors with noise and reduce precision.
@@ -111,49 +118,108 @@ function hashWord(word) {
 // Calls local Ollama to generate semantic embeddings via nomic-embed-text.
 // Dense vectors capture MEANING — "car" and "automobile" are close in dense space.
 // Used for semantic similarity search in hybrid RRF fusion.
-export const generateDenseVector = async (text) => {
+// export const generateDenseVector = async (text) => {
+//   const controller = new AbortController();
+//   const timeoutId = setTimeout(() => controller.abort(), OLLAMA_TIMEOUT_MS);
+
+//   try {
+//     const response = await fetch(OLLAMA_URL, {
+//       method: "POST",
+//       signal: controller.signal,
+//       headers: { "Content-Type": "application/json" },
+//       body: JSON.stringify({ model: EMBEDDING_MODEL, prompt: text }),
+//     });
+
+//     if (!response.ok) {
+//       const body = await response.text();
+//       throw new Error(`Ollama API error ${response.status}: ${body}`);
+//     }
+
+//     const data = await response.json();
+
+//     // Defensive access — Ollama can return 200 with error body on model load issues
+//     if (!Array.isArray(data?.embedding)) {
+//       throw new Error(
+//         `Ollama returned invalid embedding shape for model ${EMBEDDING_MODEL}`,
+//       );
+//     }
+
+//     // Matryoshka truncation: nomic-embed-text supports dimension reduction.
+//     // Truncating to 256 from 768 preserves ~95% of retrieval quality at 1/3 the storage.
+//     // REQUIREMENT: Qdrant collection must be configured with vectors.dense-text.size = 256
+//     return data.embedding.slice(0, DENSE_VECTOR_DIMENSIONS);
+//   } catch (error) {
+//     if (error.name === "AbortError") {
+//       throw new Error(
+//         `Ollama embedding timed out after ${OLLAMA_TIMEOUT_MS}ms`,
+//       );
+//     }
+//     console.error("[generateDenseVector] Failed:", error.message);
+//     throw error; // Re-throw — ingestion and search both need to know embedding failed
+//   } finally {
+//     clearTimeout(timeoutId);
+//   }
+// };
+export const generateDenseVector = async (text, type) => {
+  const task = type === "query" ? "retrieval.query" : "retrieval.passage";
+
   const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), OLLAMA_TIMEOUT_MS);
+
+  const timeoutId = setTimeout(() => controller.abort(), JINA_TIMEOUT_MS);
 
   try {
-    const response = await fetch(OLLAMA_URL, {
+    const response = await fetch(JINA_URL, {
       method: "POST",
       signal: controller.signal,
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ model: EMBEDDING_MODEL, prompt: text }),
+
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${JINA_API_KEY}`,
+      },
+
+      body: JSON.stringify({
+        model: EMBEDDING_MODEL,
+        task,
+        dimensions: DENSE_VECTOR_DIMENSIONS,
+        input: [text],
+      }),
     });
 
     if (!response.ok) {
       const body = await response.text();
-      throw new Error(`Ollama API error ${response.status}: ${body}`);
+
+      throw new Error(`Jina API error ${response.status}: ${body}`);
     }
 
     const data = await response.json();
 
-    // Defensive access — Ollama can return 200 with error body on model load issues
-    if (!Array.isArray(data?.embedding)) {
+    if (!Array.isArray(data?.data?.[0]?.embedding)) {
       throw new Error(
-        `Ollama returned invalid embedding shape for model ${EMBEDDING_MODEL}`,
+        `Jina returned invalid embedding shape for model ${EMBEDDING_MODEL}`,
       );
     }
 
-    // Matryoshka truncation: nomic-embed-text supports dimension reduction.
-    // Truncating to 256 from 768 preserves ~95% of retrieval quality at 1/3 the storage.
-    // REQUIREMENT: Qdrant collection must be configured with vectors.dense-text.size = 256
-    return data.embedding.slice(0, DENSE_VECTOR_DIMENSIONS);
-  } catch (error) {
-    if (error.name === "AbortError") {
+    const embedding = data.data[0].embedding;
+
+    if (embedding.length !== DENSE_VECTOR_DIMENSIONS) {
       throw new Error(
-        `Ollama embedding timed out after ${OLLAMA_TIMEOUT_MS}ms`,
+        `Expected ${DENSE_VECTOR_DIMENSIONS} dimensions, got ${embedding.length}`,
       );
     }
+
+    return embedding;
+  } catch (error) {
+    if (error.name === "AbortError") {
+      throw new Error(`Jina embedding timed out after ${JINA_TIMEOUT_MS}ms`);
+    }
+
     console.error("[generateDenseVector] Failed:", error.message);
-    throw error; // Re-throw — ingestion and search both need to know embedding failed
+
+    throw error;
   } finally {
     clearTimeout(timeoutId);
   }
 };
-
 // --- SPARSE VECTOR GENERATION ---
 // Produces keyword-frequency vectors for BM25-style exact term matching.
 // Sparse vectors capture KEYWORDS — "React hooks" matches "hooks" exactly.

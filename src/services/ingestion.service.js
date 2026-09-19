@@ -19,7 +19,7 @@ const CHUNK_CONFIG = {
 // Max concurrent embedding API calls per ingestion job.
 // Too high: hits rate limits. Too low: slow for large documents.
 // Tune based on your embedding provider's rate limit tier.
-const EMBEDDING_CONCURRENCY = 5;
+const EMBEDDING_CONCURRENCY = 2;
 
 // Process chunks in batches of N with controlled concurrency.
 // Prevents hammering the embedding API with 100 simultaneous requests.
@@ -77,7 +77,7 @@ export const processAndEmbedContent = async (contentDoc) => {
     EMBEDDING_CONCURRENCY,
     async ({ text, i }) => {
       const [denseVector, sparseVector] = await Promise.all([
-        generateDenseVector(text),
+        generateDenseVector(text, "document"),
         generateSparseVector(text),
       ]);
       return {

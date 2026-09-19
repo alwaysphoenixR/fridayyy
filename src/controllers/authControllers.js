@@ -1,4 +1,4 @@
-import { UserModel } from "../db/models/User.js"; // Fixed: PascalCase
+import { UserModel } from "../db/models/User.js";
 import jwt from "jsonwebtoken";
 import bcrypt from "bcrypt";
 

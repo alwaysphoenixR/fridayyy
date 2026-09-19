@@ -13,24 +13,38 @@ export const QDRANT_COLLECTION_NAME = "second_brain";
 // CHANGING THIS REQUIRES: dropping and recreating the collection + re-embedding all content.
 export const DENSE_VECTOR_DIMENSIONS = 256;
 
-// --- CLIENT INITIALIZATION ---
-// Host/port must be env vars — "localhost" breaks in Docker Compose, Kubernetes, cloud.
-// In Docker Compose, use the Qdrant service name: QDRANT_HOST=qdrant
-// For Qdrant Cloud: use the cluster URL and set QDRANT_API_KEY.
-if (!process.env.QDRANT_HOST) {
-  console.warn(
-    "[qdrant] QDRANT_HOST not set — using localhost. Set this env var for any non-local deployment.",
-  );
+// // --- CLIENT INITIALIZATION ---
+// // Host/port must be env vars — "localhost" breaks in Docker Compose, Kubernetes, cloud.
+// // In Docker Compose, use the Qdrant service name: QDRANT_HOST=qdrant
+// // For Qdrant Cloud: use the cluster URL and set QDRANT_API_KEY.
+// if (!process.env.QDRANT_HOST) {
+//   console.warn(
+//     "[qdrant] QDRANT_HOST not set — using localhost. Set this env var for any non-local deployment.",
+//   );
+// }
+
+// const qdrantClient = new QdrantClient({
+//   host: process.env.QDRANT_HOST || "localhost",
+//   port: parseInt(process.env.QDRANT_PORT) || 6333,
+//   // API key required for Qdrant Cloud and any remotely hosted instance.
+//   // Leave undefined for local Docker (no auth by default).
+//   ...(process.env.QDRANT_API_KEY && { apiKey: process.env.QDRANT_API_KEY }),
+// });
+
+const QDRANT_URL = process.env.QDRANT_URL || "http://localhost:6333";
+
+const QDRANT_API_KEY = process.env.QDRANT_API_KEY;
+
+if (!QDRANT_API_KEY && !QDRANT_URL.includes("localhost")) {
+  console.warn("[qdrant] QDRANT_API_KEY is not set for remote Qdrant.");
 }
 
 const qdrantClient = new QdrantClient({
-  host: process.env.QDRANT_HOST || "localhost",
-  port: parseInt(process.env.QDRANT_PORT) || 6333,
-  // API key required for Qdrant Cloud and any remotely hosted instance.
-  // Leave undefined for local Docker (no auth by default).
-  ...(process.env.QDRANT_API_KEY && { apiKey: process.env.QDRANT_API_KEY }),
+  url: QDRANT_URL,
+  ...(QDRANT_API_KEY && {
+    apiKey: QDRANT_API_KEY,
+  }),
 });
-
 // --- COLLECTION INITIALIZATION ---
 // Called once at server startup (in app.js / index.js).
 // Idempotent: safe to call on every restart — checks existence before creating.

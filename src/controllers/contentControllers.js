@@ -31,6 +31,7 @@ function isRAGEligible(content) {
 }
 
 export const createContent = async (req, res) => {
+  // console.log(req);
   try {
     // req.body is already validated by validate(CreateContentSchema) middleware.
     // All fields are trimmed, typed, and conform to the schema at this point.
