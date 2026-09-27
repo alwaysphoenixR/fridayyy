@@ -66,7 +66,13 @@ export const CreateContentSchema = z
     // type: z.string().trim().toLowerCase().enum(CONTENT_TYPES),
     link: z.string().url().optional(),
     textContent: z.string().max(50000).optional(),
-    isPublic: z.boolean().optional().default(false),
+    isPublic: z
+      .preprocess((val) => {
+        if (typeof val === "string") return val === "true";
+        return val;
+      }, z.boolean())
+      .optional()
+      .default(false),
     tags: z.array(z.string()).optional().default([]),
   })
   .refine(
@@ -87,7 +93,12 @@ export const UpdateContentSchema = z
   .object({
     title: z.string().trim().min(1).max(500).optional(),
     textContent: z.string().max(50000).optional(),
-    isPublic: z.boolean().optional(),
+    isPublic: z
+      .preprocess((val) => {
+        if (typeof val === "string") return val === "true";
+        return val;
+      }, z.boolean())
+      .optional(),
     tags: z.array(z.string()).optional(),
 
     // type and link are intentionally excluded.

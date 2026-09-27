@@ -1,1 +1,71 @@
 @import "tailwindcss";
+
+@theme {
+  /* Brand Identity & Visual Language */
+  --color-brand-black: #141414;
+  --color-brand-dark: #1e1e1e;
+  --color-brand-gray-900: #262626;
+  --color-brand-gray-700: #525252;
+  --color-brand-gray-500: #737373;
+  --color-brand-gray-400: #a3a3a3;
+  --color-brand-gray-200: #e5e5e5;
+  --color-brand-gray-100: #f3f3f3;
+  --color-brand-gray-50: #f9f9f9;
+  
+  --color-surface-white: #ffffff;
+  --color-surface-page: #f9f9f9;
+  --color-surface-card: #ffffff;
+  --color-surface-subtle: #f3f3f3;
+  
+  /* Brand Accents */
+  --color-accent-orange: #ff5f00;
+  --color-accent-orange-hover: #e55500;
+  --color-accent-orange-subtle: #fff4ed;
+  
+  --color-accent-red: #eb001b;
+  --color-accent-green: #10b981;
+  
+  /* Map primitive colors to specific tailwind tokens for ease of use if needed */
+  --color-primary: var(--color-brand-black);
+  --color-on-primary: var(--color-surface-white);
+  --color-secondary: var(--color-accent-orange);
+  --color-on-secondary: var(--color-surface-white);
+  --color-error: var(--color-accent-red);
+  --color-background: var(--color-surface-page);
+  
+  /* Typography */
+  --font-sans: "Plus Jakarta Sans", system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  --font-mono: "JetBrains Mono", "Fira Code", monospace;
+  
+  /* Shadows */
+  --shadow-soft: 0 4px 20px -2px rgba(0, 0, 0, 0.04);
+  --shadow-modal: 0 24px 48px -12px rgba(0, 0, 0, 0.14);
+  --shadow-card: 0 2px 8px -1px rgba(0, 0, 0, 0.04), 0 1px 3px -1px rgba(0, 0, 0, 0.02);
+  --shadow-elevated: 0 12px 32px -4px rgba(0, 0, 0, 0.08);
+
+  /* Border Radii */
+  --radius-pill: 9999px;
+  --radius-card: 16px;
+  --radius-container: 24px;
+}
+
+@layer base {
+  body {
+    background-color: var(--color-background);
+    color: var(--color-brand-gray-700);
+    font-family: var(--font-sans);
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
+  /* Utility classes for border defaults */
+  .border-subtle {
+    border-color: rgba(0, 0, 0, 0.06);
+  }
+
+  /* Hide the native browser password reveal eye icon (Edge/IE) since we provide our own custom one */
+  input[type="password"]::-ms-reveal,
+  input[type="password"]::-ms-clear {
+    display: none;
+  }
+}

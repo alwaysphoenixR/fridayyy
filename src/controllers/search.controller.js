@@ -92,9 +92,9 @@ export const searchBrain = async (req, res) => {
     return res.status(200).json({
       answer: finalAnswer,
       sources: points.map((p) => ({
-        title: p.payload.title,
-        text: p.payload.text,
-        score: p.score,
+        title: p.payload?.title || "Unknown Document",
+        text: p.payload?.text || "",
+        score: p.score || 0,
       })),
     });
   } catch (error) {
